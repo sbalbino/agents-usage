@@ -26,10 +26,12 @@ try { $saved = @((Get-Content $settingsPath -Raw -ErrorAction Stop | ConvertFrom
 $Width = $PW * $script:show.Count
 $GWL_EXSTYLE = -20; $TRANSPARENT = 0x20; $TOOLWINDOW = 0x80; $NOACTIVATE = 0x08000000
 
-# credentials JSON: Windows first, then WSL
+# credentials JSON, looked up on Windows and in WSL
 function Read-Json($rel) {
   $paths = @("$env:USERPROFILE\$rel") + (Get-ChildItem "\\wsl.localhost\*\home\*\$rel" -ErrorAction SilentlyContinue).FullName
-  foreach ($p in $paths) { if ($p -and (Test-Path $p)) { return Get-Content $p -Raw | ConvertFrom-Json } }
+  # newest file wins: the tool refreshes the token where it runs (Windows or WSL), the other copy goes stale
+  $p = $paths | Where-Object { $_ -and (Test-Path $_) } | Sort-Object { (Get-Item $_).LastWriteTime } -Descending | Select-Object -First 1
+  if ($p) { Get-Content $p -Raw | ConvertFrom-Json }
 }
 
 function Get-Row($label, $b, $hours) {
@@ -48,7 +50,7 @@ function Get-Claude {
   if (-not $tok) { return @{ Error = 'no credentials - open Claude Code' } }
   try {
     # ponytail: synchronous calls (UI freezes up to 15s if the network drops), move to a runspace if it bothers
-    $u = Invoke-RestMethod 'https://api.anthropic.com/api/oauth/usage' -TimeoutSec 15 `
+    $u = Invoke-RestMethod 'https://api.anthropic.com/api/oauth/usage' -TimeoutSec 15 -DisableKeepAlive `
          -Headers @{ Authorization = "Bearer $tok"; 'anthropic-beta' = 'oauth-2025-04-20' }
     @{ Rows = @((Get-Row '5h session' $u.five_hour 5), (Get-Row 'Week' $u.seven_day 168)) }
   } catch { @{ Error = "error: $($_.Exception.Message.Split("`n")[0])" } }
@@ -69,7 +71,7 @@ function Get-Codex {
   try {
     $h = @{ Authorization = "Bearer $tok" }
     if ($a.tokens.account_id) { $h['ChatGPT-Account-Id'] = $a.tokens.account_id }
-    $u = Invoke-RestMethod 'https://chatgpt.com/backend-api/wham/usage' -TimeoutSec 15 -Headers $h
+    $u = Invoke-RestMethod 'https://chatgpt.com/backend-api/wham/usage' -TimeoutSec 15 -DisableKeepAlive -Headers $h
     $p = ConvertTo-Bucket $u.rate_limit.primary_window 5
     $s = ConvertTo-Bucket $u.rate_limit.secondary_window 168
     @{ Rows = @((Get-Row '5h session' $p $(if ($p) { $p.hours } else { 5 })), (Get-Row 'Week' $s $(if ($s) { $s.hours } else { 168 })))
